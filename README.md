@@ -2,9 +2,13 @@
 
 Trying to blink an LED on a 1.35€ "blue pill" STM32F103C8 board.
 
+# Installing
+
+I already hade Rustup installed. I removed the unsued toolchains and then followed instructions in chapter 1.3 and 1.3.3 (I used Windows, don't judge) of [The Embedded Rust Book](https://rust-embedded.github.io/book/intro/index.html). I also added cargo-generate as told in chapter 1.2 (`cargo install cargo-generate`).
+
 # UNEXPECTED idcode: 0x2ba01477
 
-After following chapter 1.3 and 1.3.3 of [The Embedded Rust Book](https://rust-embedded.github.io/book/intro/install.html), I tryed starting OpenOCD to check that if found my STLink-V2-1 programmer and my Blue Pill board. The Book says to type : `openocd -f interface/stlink-v2-1.cfg -f target/stm32f3x.cfg`but since my board has an stm32f103, I used `openocd -f interface/stlink-v2-1.cfg -f target/stm32f1x.cfg`:
+After following chapters 1.3 and 1.3.3 of [The Embedded Rust Book](https://rust-embedded.github.io/book/intro/install.html), I tryed starting OpenOCD to check that if found my STLink-V2-1 programmer and my Blue Pill board. The Book says to type : `openocd -f interface/stlink-v2-1.cfg -f target/stm32f3x.cfg`but since my board has an stm32f103, I used `openocd -f interface/stlink-v2-1.cfg -f target/stm32f1x.cfg`:
 
 ```
 D:\code\OpenOCD\bin>openocd -f interface/stlink-v2-1.cfg -f target/stm32f1x.cfg
