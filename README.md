@@ -127,12 +127,13 @@ MEMORY
 
 # Configuring the Core
 
-We want to compile for our microcontoller. A microcontoler is an microprocessor packages with things like RAM, Flash memory, digital to analog converters, timers... Rust needs to know for which mcu we want to compile. The stm32f103 has a Cortex-M3 core (which is a proprietary but standard core found on many mcu form different manufacturers). Its architecture is called "ARMv7-M". Some ARM cores support an older instruction set, and some can be switched from the older ARM instruction set to the newer Thumb instruction set (smaller and faster). But the M3 only supports the newer Thumb instruction set. If you use a different Cortex-M mcu, have a look at [wikipedia](https://en.wikipedia.org/wiki/ARM_Cortex-M#Instruction_sets) to find which compilation target you want to configure in `.cargo/config`, for the Blue Pill it will be:
+We want to compile for our microcontoller. A microcontoler is an microprocessor packages with things like RAM, Flash memory, digital to analog converters, timers... Rust needs to know for which mcu we want to compile. The stm32f103 has a Cortex-M3 core (which is a proprietary but standard core found on many mcu form different manufacturers). Its architecture is called "ARMv7-M", this information is in the datasheet but I got it from [wikipedia](https://en.wikipedia.org/wiki/ARM_Cortex-M#Cortex-M3). So in `.cargo/config`, for the Blue Pill it will be:
 ```
 [build]
 target = "thumbv7m-none-eabi"    # Cortex-M3
 
 ```
+`thumb` here relate to the instruction-set we want to use. Since Cortex-M only support the newer Thumb instructon (which is a 16 bits instructions set, as opposed to the older 32 bits ARM set,  it's faster and take less space, see [wikipedia](https://en.wikipedia.org/wiki/ARM_architecture#Thumb) again). 
 
 # Deleting the target directory
 
@@ -215,3 +216,117 @@ I guess I uploaded something because the Blue Pill stopped blinking the LED that
 I tryed following the chapter 2.2 form there, but "next" was not of much help when gdb could not find the debugging symbol in my binary. So I tryed running the code (`continue` send to openocd from gdb) but nothing appeared in the openocd console. I was expecting an "Hello, world!".
 
 I quit openocd and gdb, and use `STM32 ST-LINK Utility.exe` from ST. I clicked "connect the target" and look if the flash of the  Blue Pill seemed to contain the "Hello, world!" string: it did not. I reset the Blue Pill and it start blinking. It seems I did not flash the firmware.
+
+# This time it works!
+
+After chatting on IRC, I tryed to use the GCC toolchain instead of just the GNU linker (see comments in `.cargo/config`) and it compiled and I could upload and exectue the firmware.
+Now, I was not really sure about the screenshot I made in this documentation about the previous chapter (the "a program is being debugged already" message was only a mistake in one of the many attempts I did). So I wanted to move back to the not-working configuration and take new snapshot of all messages. And this time it worked: even after I deleted the `target` directory to make a new build from scratch, the build no longer stalled at step 29/33 :
+```
+D:\code\rust\blink_bluepill_rust\blue_pill_blinky>cargo build
+   Compiling semver-parser v0.7.0
+   Compiling proc-macro2 v0.4.24
+   Compiling unicode-xid v0.1.0
+   Compiling rand_core v0.3.0
+   Compiling vcell v0.1.0
+   Compiling cortex-m v0.5.8
+   Compiling cortex-m-rt v0.6.7
+   Compiling aligned v0.2.0
+   Compiling cortex-m-semihosting v0.3.2
+   Compiling blue_pill_blinky v0.1.0 (D:\code\rust\blink_bluepill_rust\blue_pill_blinky)
+   Compiling r0 v0.2.2
+   Compiling panic-halt v0.2.0
+   Compiling volatile-register v0.2.0
+   Compiling rand_core v0.2.2
+   Compiling semver v0.9.0
+   Compiling rand v0.5.5
+   Compiling rustc_version v0.2.3
+   Compiling bare-metal v0.2.4
+   Compiling quote v0.6.10
+   Compiling syn v0.15.24
+   Compiling cortex-m-rt-macros v0.1.5
+    Finished dev [unoptimized + debuginfo] target(s) in 40.82s
+```
+I really can't think of any change I could have made. I did not reboot my computer, didn't upgrade or install anything. I made more than ten attempts with the stalling step before, tryed rebooting my computer and reinstalling the toolchain with rustup did not fix anything.
+
+Well, so now I can continue this writeup with the firmware upload and debugging using the firmware compiled with the LLD linker (the default choice if you use the kickstart project from the Embedded Book). I also learnt how to properly the given openocd.dbg file so here is what I do now:
+
+1. Start OpenOCD
+ ```
+ D:\code\rust\blink_bluepill_rust\blue_pill_blinky>d:\code\OpenOCD\bin\openocd.exe
+GNU MCU Eclipse 64-bit Open On-Chip Debugger 0.10.0+dev-00352-gaa6c7e9b (2018-10-20-06:24)
+Licensed under GNU GPL v2
+For bug reports, read
+        http://openocd.org/doc/doxygen/bugs.html
+WARNING: interface/stlink-v2-1.cfg is deprecated, please switch to interface/stlink.cfg
+Info : auto-selecting first available session transport "hla_swd". To override use 'transport select <transport>'.
+Info : The selected transport took over low-level target control. The results might differ compared to plain JTAG/SWD
+adapter speed: 1000 kHz
+adapter_nsrst_delay: 100
+none separate
+Info : Listening on port 6666 for tcl connections
+Info : Listening on port 4444 for telnet connections
+Info : Unable to match requested speed 1000 kHz, using 950 kHz
+Info : Unable to match requested speed 1000 kHz, using 950 kHz
+Info : clock speed 950 kHz
+Info : STLINK v2 JTAG v32 API v2 SWIM v7 VID 0x0483 PID 0x3748
+Info : using stlink api v2
+Info : Target voltage: 3.203691
+Info : cs32f1x.cpu: hardware has 6 breakpoints, 4 watchpoints
+Info : Listening on port 3333 for gdb connections
+```
+(I start from the directory where `openocd.cfg` file is, so I don't need to provide the `-f interface/stlink-v2-1.cfg -f target/cs32f1x.cfg`. And remember you might or might not need to make and use the `cs32f1x.cfg` file instead of `target/stm32f1x.cfg`)
+
+2. Start gdb
+ ```
+ D:\code\rust\blink_bluepill_rust\blue_pill_blinky>arm-none-eabi-gdb -x openocd.gdb target\thumbv7m-none-eabi\debug\blue_pill_blinky
+d:\Program Files (x86)\GNU Tools ARM Embedded\8 2018-q4-major\bin\arm-none-eabi-gdb.exe: warning: Couldn't determine a path for the index cache directory.
+GNU gdb (GNU Tools for Arm Embedded Processors 8-2018-q4-major) 8.2.50.20181213-git
+Copyright (C) 2018 Free Software Foundation, Inc.
+License GPLv3+: GNU GPL version 3 or later <http://gnu.org/licenses/gpl.html>
+This is free software: you are free to change and redistribute it.
+There is NO WARRANTY, to the extent permitted by law.
+Type "show copying" and "show warranty" for details.
+This GDB was configured as "--host=i686-w64-mingw32 --target=arm-none-eabi".
+Type "show configuration" for configuration details.
+For bug reporting instructions, please see:
+<http://www.gnu.org/software/gdb/bugs/>.
+Find the GDB manual and other documentation resources online at:
+    <http://www.gnu.org/software/gdb/documentation/>.
+
+For help, type "help".
+Type "apropos word" to search for commands related to "word"...
+Reading symbols from target\thumbv7m-none-eabi\debug\blue_pill_blinky...
+core::sync::atomic::compiler_fence (order=32) at libcore/sync/atomic.rs:2351
+2351    libcore/sync/atomic.rs: No such file or directory.
+Breakpoint 1 at 0x8000f68: file C:\Users\Fabien\.cargo\registry\src\github.com-1ecc6299db9ec823\cortex-m-rt-0.6.7\src\lib.rs, line 550.
+Function "UserHardFault" not defined.
+Make breakpoint pending on future shared library load? (y or [n]) [answered N; input not from terminal]
+Breakpoint 2 at 0x80015aa: file C:\Users\Fabien\.cargo\registry\src\github.com-1ecc6299db9ec823\panic-halt-0.2.0\src\lib.rs, line 32.
+Breakpoint 3 at 0x8000402: file src\main.rs, line 13.
+semihosting is enabled
+Loading section .vector_table, size 0x400 lma 0x8000000
+Loading section .text, size 0x1220 lma 0x8000400
+Loading section .rodata, size 0x2ac lma 0x8001620
+Start address 0x8000f26, load size 6348
+Transfer rate: 17 KB/sec, 2116 bytes/write.
+Note: automatically using hardware breakpoints for read-only addresses.
+halted: PC: 0x08000f7c
+DefaultPreInit ()
+    at C:\Users\Fabien\.cargo\registry\src\github.com-1ecc6299db9ec823\cortex-m-rt-0.6.7\src\lib.rs:559
+559     pub unsafe extern "C" fn DefaultPreInit() {}
+(gdb) _
+```
+I now add the `-x openocd.gdb` parameter which is a script that does some things for us (like connecting gdb to openocd). Since the script is ran before we can use the `file` command to tell gdb where the elf file for the firmware is, we add the path to this as the last argument to gdb.
+When the script is ran, you will see some information displayed in the other shell (the one with openocd running). The `semihosting is enabled` tells you that semihosting is activated. As the Rust Embedded Book explains, this allows us to basically use the debugger as stdout, hence display messages in OpenOCD.
+
+3. step through
+after using the `next` command in dgb, I finally got the expected message in OpenOCD:
+```
+Info : halted: PC: 0x0800040a
+Info : halted: PC: 0x0800040c
+Info : halted: PC: 0x08000626
+Hello, world!
+Info : halted: PC: 0x08000412
+Info : halted: PC: 0x08000414
+Info : halted: PC: 0x08000416
+```
