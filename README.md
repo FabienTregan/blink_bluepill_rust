@@ -219,7 +219,7 @@ I tryed following the chapter 2.2 form there, but "next" was not of much help wh
 
 I quit openocd and gdb, and use `STM32 ST-LINK Utility.exe` from ST. I clicked "connect the target" and look if the flash of the  Blue Pill seemed to contain the "Hello, world!" string: it did not. I reset the Blue Pill and it start blinking. It seems I did not flash the firmware.
 
-## This time it works!
+## Semihosting works!
 
 After chatting on IRC, I tryed to use the GCC toolchain instead of just the GNU linker (see comments in `.cargo/config`) and it compiled and I could upload and exectue the firmware.
 
@@ -316,4 +316,115 @@ Up to now, I have not done much thing wich is specific to the stm32f103c8 (clone
  * I changed the `idcode` in OpenOCD so I can tell it which `idcode` to expect from my clone
  * I set the proper size and base address for the flash and sram in the `memory.x` file.
 
- From there, it would be possible to directly read and write to the address of the special function registers to use all my microcontroller's peripherals. All I would need is some kind of .h file to give me the addresses, or I could directly read the datasheet and define them in my code. But if I do things this way, I would need to modify the code for every  
+ Now let's try to follow the Chapter 3 of The Rust Embedded Book, adapting the peripheral to the one available on the stm32f103. At first I want to follow a rather close to the metal approach (writting to Special Fucntion Registers, which are registers each having a fixed address in the address space of the MCU which serve to control the peripherals on the MCU).
+
+ ## Timer
+
+ At first I wander why the datasheet of the stm32f103 didn't give information about the special function registers used to control the timers. The thing is that the timer are not designed by ST (manufacturer of the stm32's), but standard Cortex peripherals designed by ARM. The information are in [ARM's Cortex-M3 documentation](http://infocenter.arm.com/help/index.jsp?topic=/com.arm.doc.dui0552a/Babieigh.html) and the System Timer has the same SFR (Special Function Registers) at the same address as the System Timer on the Cortex-M4 used by the authors of the book (which is an STM32F3DISCOVERY with a Cortex-M4F STM32F303VCT6 microcontroller)
+
+ I wanted to go step by step, and execute even the first steps of the [3.1](https://rust-embedded.github.io/book/peripherals/a-first-attempt.html)("A First Attempt") chapter. It could have been easy to rewrite (or even copy/paste) but I learn more by rewritting the code from The ERB ("Embedded Rust Book" is a nice name but it's annoying when you type it so often :) ), unfortunately this line did not compile:
+ ```
+ let time = unsafe { std::ptr::read_volatile(&mut systick.cvr) };
+ ```
+The reason is that we compile for a microcontroller, hence want to get ride of the many things that comes in Rust standard lib. I edited my frist code which started with the `#![no_std]` attribute which tells the Rust compiler not to use this library. Of course you can not use `std::ptr::read_volatile` then because it is in the standard library (that's what the `std` stands for : standard).
+
+I went to the Rust Embedded IRC channel to discuss this issue, it appeared the standard library does not exist for Cortex-M. The standard library wraps and adds functionnalities on the Core library and these additions are not wanted (because of limited ressource) or even possible (because they deal with coordinating with the operating system which is not present when you code for small MCUs). Fortunately, `std::ptr::read_volatile` is just a proxy for `core::ptr::read_volatile`, so we can use the Core Library instead. (This hade already been reported to the ERB team, but was dormant. Someone on the IRC channel made a pull request five minutes after I told them about my problem so you may not see it when you read the ERB.)
+
+So, now we have something that should work:
+```rust
+#![no_main]
+#![no_std]
+
+extern crate panic_halt;
+
+use cortex_m_rt::entry;
+use cortex_m_semihosting::hprintln;
+
+#[repr(C)]
+struct SysTick {
+    pub csr: u32,
+    pub rvr: u32,
+    pub cvr: u32,
+    pub calib: u32,
+}
+
+#[entry]
+fn main() -> ! {
+
+    let systick = unsafe { &mut *(0xE000_E010 as *mut SysTick) };
+
+    loop {
+        let current_value_register = unsafe { core::ptr::read_volatile(&mut systick.cvr) };
+        hprintln!("System timer current value is now {}.", current_value_register).unwrap();
+    }
+}
+```
+and after starting gdb and running (you need to `continue` twice, `c` is a shortcut for `continue`command) you get this fantastic output:
+```
+System timer current value is now 0.
+System timer current value is now 0.
+System timer current value is now 0.
+System timer current value is now 0.
+System timer current value is now 0.
+System timer current value is now 0.
+```
+Not realy what we expected...
+
+The code in [Chapter 3.1 of the ERB](https://rust-embedded.github.io/book/peripherals/a-first-attempt.html) aims at showing you how to create code, not how to use the timer on an stm32f. They hide some important things that can be found in the [ARM's Cortex-M3 documentation](http://infocenter.arm.com/help/index.jsp?topic=/com.arm.doc.dui0552a/Babieigh.html):
+ * You need to set the Reload Value Register, which contain the value at which the timer will be reset when it reaches 0
+ * You need to enable the counter (and eventually set the source clock you want to use, I will use internal processor clock because... why not)
+
+ Hence the following code:
+ ```Rust
+#![no_main]
+#![no_std]
+
+extern crate panic_halt;
+
+use cortex_m_rt::entry;
+use cortex_m_semihosting::hprintln;
+
+#[repr(C)]
+struct SysTick {
+    pub csr: u32,
+    pub rvr: u32,
+    pub cvr: u32,
+    pub calib: u32,
+}
+
+#[entry]
+fn main() -> ! {
+
+    let systick = unsafe { &mut *(0xE000_E010 as *mut SysTick) };
+
+    // Reload  Value Register set to 0x00FFFFFF
+    // when timer starts or reachs 0, set automatically set is back to this value
+    unsafe { core::ptr::write_volatile(&mut systick.rvr, 0x00FFFFFF) };
+    
+    // Timer Control and Status Register set so:
+    // -Timer uses processor clock
+    // -No exception is raised when value reaches zero
+    // -Counter is enabled
+    unsafe { core::ptr::write_volatile(&mut systick.csr, 0b000000000000000_0_0000000000000_101) };
+
+    loop {
+        let current_value_register = unsafe { core::ptr::read_volatile(&mut systick.cvr) };
+        hprintln!("System timer current value is now {}.", current_value_register).unwrap();
+    }
+}
+ ```
+ Tadaaaa:
+ ```
+System timer current value is now 16777190.
+System timer current value is now 16774224.
+System timer current value is now 16771610.
+System timer current value is now 16768996.
+System timer current value is now 16766382.
+System timer current value is now 16763768.
+System timer current value is now 16761154.
+System timer current value is now 16758540.
+System timer current value is now 16755926.
+System timer current value is now 16753312.
+System timer current value is now 16750698.
+System timer current value is now 16748084.
+```
