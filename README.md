@@ -428,3 +428,91 @@ System timer current value is now 16753312.
 System timer current value is now 16750698.
 System timer current value is now 16748084.
 ```
+
+## Blinking the LED
+
+Using the same way to access the proper SFR, it should be easy to blink the led that is on PC13 (PC13 is "Port C, pin 13". There is a pin of the stm32f which can supply current to an LED on the Blue Pill, and the voltage of this pin can be controller by the Port C, which can be controlled using the proper SFR)
+
+It has not been as straight forward as I thought, mainly because I never used very few Cortex MCUs before. But one you understand how it works, that's super easy:
+ * You need to activate the clock for the Port C (else Port C is sleeping, this is a power saving feature)
+ * You need to configure the Port C bit 13 as an output
+ * In order to find the address of a SFR, you need to look at the memory map diagram in the [Datasheet of the stm32f103](file:///C:/Users/Fabien/AppData/Local/Temp/cd00161566-1.pdf) or the [Reference Manual for STM32F101xx, STM32F102xx, STM32F103xx, STM32F105xx andSTM32F107xx advanced Arm®-based 32-bit MCUs](https://www.st.com/content/ccc/resource/technical/document/reference_manual/59/b9/ba/7f/11/af/43/d5/CD00171190.pdf/files/CD00171190.pdf/jcr:content/translations/en.CD00171190.pdf) to find the base address for the peripheral (you should find that the address space for Port C is 0x4001_1000 - 0x4001_13FF, hence base address is 0x4001_1000), and add the offset address for the SFR you want to access for this peripheral (or add the same offset to base address of another port if you want to control e.g. Port A or Port B).
+
+ I will let you look in the reference manual about the SFR to control the Ports, but they lead to the following code:
+ ```rust
+ //! Prints "Hello, world!" on the host console using semihosting
+
+#![no_main]
+#![no_std]
+
+extern crate panic_halt;
+
+use cortex_m_rt::entry;
+use cortex_m_semihosting::hprintln;
+
+#[repr(C)]
+struct SysTick {
+    pub csr: u32,
+    pub rvr: u32,
+    pub cvr: u32,
+    pub calib: u32,
+}
+
+#[repr(C)]
+struct PortConfiguration {
+    pub GPIOx_CRL: u32,
+    pub GPIOx_CRH: u32,
+    pub GPIOx_IDR: u32,
+    pub GPIOx_ODR: u32,
+    pub GPIOx_BSRR: u32,
+    pub GPIOx_BRR: u32,
+    pub GPIOx_LCKR: u32,
+}
+
+const PORT_C_BASE_ADDRESS: u32 = 0x4001_1000;
+const RCC_APB2ENR_ADDRESS: u32 = 0x4002_1000 + 0x18;
+
+#[entry]
+fn main() -> ! {
+
+    let systick = unsafe { &mut *(0xE000_E010 as *mut SysTick) };
+    let port_c_sfr = unsafe { &mut *(PORT_C_BASE_ADDRESS as *mut PortConfiguration) };
+
+    // Enables IO port C clock, disable many other that are probably already disabled.
+    unsafe { core::ptr::write_volatile(RCC_APB2ENR_ADDRESS as *mut u32, 1 << 4) };
+
+    // Reload  Value Register set to 0x00FFFFFF
+    // when timer starts or reachs 0, set automatically set is back to this value
+    unsafe { core::ptr::write_volatile(&mut systick.rvr, 0x00FFFFFF) };
+    
+    // Timer Control and Status Register set so:
+    // -Timer uses processor clock
+    // -No exception is raised when value reaches zero
+    // -Counter is enabled
+    unsafe { core::ptr::write_volatile(&mut systick.csr, 0b000000000000000_0_0000000000000_101) };
+
+    // Port Configuration Register High for Port E:
+    // -everything is floating input, exceptpin PC13 which is open drain output.
+    unsafe { core::ptr::write_volatile(&mut port_c_sfr.GPIOx_CRH, 0b0100_0100_0110_0100_0100_0100_0100_0100 ) };
+
+    loop {
+
+        unsafe { core::ptr::write_volatile(&mut port_c_sfr.GPIOx_ODR, 0b0000000000000000_0010000000000000 ) };
+
+        let current_value_register = unsafe { core::ptr::read_volatile(&mut systick.cvr) };
+        hprintln!("System timer current value is now {}.", current_value_register).unwrap();
+
+        unsafe { core::ptr::write_volatile(&mut port_c_sfr.GPIOx_ODR, 0b0000000000000000_0000000000000000 ) };
+
+        let current_value_register = unsafe { core::ptr::read_volatile(&mut systick.cvr) };
+        hprintln!("System timer current value is now {}.", current_value_register).unwrap();
+    }
+}
+```
+And it blinks !
+
+Note that this code is completely hugly. My intent there was just to make sure I understood the 3.1 Chapter of The ERB and refactor making sure I understand every character I typed.
+
+Also that this code has no code dedicated to spending some time beetwin turning the LED on and off. But since the semihosting is so slow, enough time is spent there (at least with default clock configuration).
+
+If you let this code, you can not execute the firmware without the ST-Link connected and GDB started (the code would panic). If you remove the semihosting from the code, the led would blink so fast you won't see it blinking.

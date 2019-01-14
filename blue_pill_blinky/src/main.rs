@@ -37,7 +37,7 @@ fn main() -> ! {
     let port_c_sfr = unsafe { &mut *(PORT_C_BASE_ADDRESS as *mut PortConfiguration) };
 
     // Enables IO port C clock, disable many other that are probably already disabled.
-    unsafe { core::ptr::write_volatile(RCC_APB2ENR_ADDRESS as *mut u32, 1 << 5) };
+    unsafe { core::ptr::write_volatile(RCC_APB2ENR_ADDRESS as *mut u32, 1 << 4) };
 
     // Reload  Value Register set to 0x00FFFFFF
     // when timer starts or reachs 0, set automatically set is back to this value
