@@ -655,7 +655,7 @@ At this point, if I can try to comment the `#![deny(unsafe_code)]` attribute and
 
 It seems it partially works: the LED blinks but at a very high frequency. I guess my `wait()` is not working because the HAL changed some settings on the system time or changed the frequency of the system clock.
 
-I made a few tests to confirm that the probleme was with `wait()` and not with the access to `PC13` (Port C, pin 13), and changing the `systick.rvr` (reset value of the timer, that means duration of the wait) did not change anything. So the System Counter must have been deactivated when accessing RCC to activate Port C clock.
+I made a few tests to confirm that the problem was with `wait()` and not with the access to `PC13` (Port C, pin 13), and changing the `systick.rvr` (reset value of the timer, that means duration of the wait) did not change anything. So the System Counter must have been deactivated when accessing RCC to activate Port C clock.
 
 So I try to use the HAL to access the timer too:
 ```rust
@@ -696,3 +696,86 @@ nb = "0.1.1"
 And it works.
 
 But I'm not really happy with this: I copy-pasted some of the code and don't understand why we need access to something called `FLASH` to use the clock.
+
+The `freeze` trait signature is `pub fn freeze(self, acr: &mut ACR) -> Clocks`. After some research and guessing, I believe that because bits 0 to 2 of the Flash Access Control Register (ACR) sets the latency for writting to Flash memory. Since with mutable access to Clocks, you can change the system clock frequency, you probably need to adjust the latency, hence the need for it.
+
+## Cleaning the code
+
+Cleaning this code, I wanted to make a function to blink the led, and pass it what it requires. The `Timer` type is parameterized, and you can't use a generic `Time<A>` type because if does not provide `wait()`. I looked at the HAL code and the system timer implements a `CountDown` trait that defines `wait()`, unfortunately this trait is private so we can't use it in the signature. So for now I used Timer<SYST>, but the code will only work with the system timer.
+
+I was ok with this, but passing the pin (PC13) lead to more problem: the type of the pin is PC13, making it impossible to pass another pin. The pin implements the OutputPin trait, but I could not understand in which crate this one ws defined so I can import it and use it as a signature. So I thought that the HAL I was using was not completely mature (it is on github but not on crates.io), so I tryed to switch to `stm32f1xx-hal = "0.1.1"`, but this one did not compile. The `stm32f1xx` crate covers the whole 1xx family, and you need to tell which one you want to use the the family, using Cargo's feature:
+```
+[dependencies.stm32f1xx-hal]
+features = ["stm32f103", "rt"]
+version = "0.1.1"
+```
+I update the code (mainly copy-pasting from the `examples/blinky.rs` file in the stm32f1xx-hal [source code](https://github.com/japaric/stm32f103xx-hal/blob/master/examples/blinky.rs)), but still didn't manage to fix the issue about `led` being typed as PC13 and not as an abstract `OutputPin`. After reading the code of the macro that generates this `PC13` and still not being able to understand how it was possible that the trait provides implementation for `set_low()` ad `set_high()` but I was still not able to cast the `PC13` to an `OutputPin`, I finally got it, chatting alone on IRC:
+
+> 16:02	treg    Grrr, I really don't understand this:  
+ 16:04	treg	The macro for the gpios defines function `into_push_pull_output` which returns a `$PXi<Output<PushPull>>`  
+ 16:06	treg	later it provides implementation for the `OutputPin` trait (that is imported from `hal-embedded`) : `impl<MODE> OutputPin for $PXi<Output<MODE>> {`  
+ 16:06	treg	That makes sense, and I then can do: `let mut led = gpioc.pc13.into_push_pull_output(&mut gpioc.crh); led.set_low();`  
+ 16:07	treg	But then when I want to pass led as a parameter, using `OutputPin` as a trait (also used from `embedded_hal`), I get :  
+ 16:08	treg	`expected trait hal:relude:utputPin, found struct hal::gpio::gpioc:C13`  
+ 16:11	treg	noooooooooooo  
+ 16:12	treg	That was because I wasn't passing a mutable reference... The compilator's error message has not been very helpfull on this one 
+
+This code finally compiles:
+```rust
+#![deny(unsafe_code)]
+#![deny(warnings)]
+#![no_main]
+#![no_std]
+
+extern crate cortex_m;
+extern crate cortex_m_rt as rt;
+extern crate panic_halt;
+extern crate stm32f1xx_hal as hal;
+#[macro_use(block)]
+extern crate nb;
+extern crate embedded_hal;
+
+use hal::prelude::*;
+use hal::stm32;
+use hal::timer::Timer;
+use rt::{entry};
+use cortex_m::peripheral::SYST;
+use embedded_hal::digital::OutputPin;
+
+#[entry]
+fn main() -> ! {
+
+    // Get control of the PC13 pin
+    let device_peripherals = stm32::Peripherals::take().unwrap();
+    let mut rcc = device_peripherals.RCC.constrain();
+    let mut gpioc = device_peripherals.GPIOC.split(&mut rcc.apb2);
+    let mut led = gpioc.pc13.into_push_pull_output(&mut gpioc.crh);
+
+    let cortex_peripherals = cortex_m::Peripherals::take().unwrap();
+    let mut flash = device_peripherals.FLASH.constrain();
+    let clocks = rcc.cfgr.freeze(&mut flash.acr);
+    let mut timer = Timer::syst(cortex_peripherals.SYST, 5.hz(), clocks);
+
+    led.set_high();
+    loop {
+        blink(&mut timer, &mut led, 2);
+        wait(&mut timer, 10);
+    }
+}
+
+fn blink(timer: &mut Timer<SYST>, led: &mut OutputPin, times: usize) -> () {
+    for _n in 0..times {
+        led.set_low();
+        block!(timer.wait()).unwrap();
+        led.set_high();
+        block!(timer.wait()).unwrap();
+    }
+}
+
+fn wait(timer: &mut Timer<SYST>, times: usize) -> () {
+    for _n in 0..(times*2) {
+        block!(timer.wait()).unwrap();
+    }
+}
+```
+Not only does it compile: it works :)
