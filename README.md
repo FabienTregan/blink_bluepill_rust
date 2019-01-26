@@ -328,7 +328,7 @@ Up to now, I have not done much thing wich is specific to the stm32f103c8 (clone
  ```
 The reason is that we compile for a microcontroller, hence want to get ride of the many things that comes in Rust standard lib. I edited my frist code which started with the `#![no_std]` attribute which tells the Rust compiler not to use this library. Of course you can not use `std::ptr::read_volatile` then because it is in the standard library (that's what the `std` stands for : standard).
 
-I went to the Rust Embedded IRC channel to discuss this issue, it appeared the standard library does not exist for Cortex-M. The standard library wraps and adds functionnalities on the Core library and these additions are not wanted (because of limited ressource) or even possible (because they deal with coordinating with the operating system which is not present when you code for small MCUs). Fortunately, `std::ptr::read_volatile` is just a proxy for `core::ptr::read_volatile`, so we can use the Core Library instead. (This hade already been reported to the ERB team, but was dormant. Someone on the IRC channel made a pull request five minutes after I told them about my problem so you may not see it when you read the ERB.)
+I went to the Rust Embedded IRC channel to discuss this issue, it appeared the standard library does not exist for Cortex-M. The standard library wraps and adds functionnalities on the Core library and these additions are not wanted (because of limited ressource) or even possible ("jamesmunns: The Standard Library has all sorts of dependencies on things like filesystems, networking concepts, heap allocations, etc."). Fortunately, `std::ptr::read_volatile` is just a proxy for `core::ptr::read_volatile`, so we can use the Core Library instead. (This hade already been reported to the ERB team, but was dormant. Someone on the IRC channel made a pull request five minutes after I told them about my problem so you may not see it when you read the ERB.)
 
 So, now we have something that should work:
 ```rust
@@ -516,3 +516,183 @@ Note that this code is completely hugly. My intent there was just to make sure I
 Also that this code has no code dedicated to spending some time beetwin turning the LED on and off. But since the semihosting is so slow, enough time is spent there (at least with default clock configuration).
 
 If you let this code, you can not execute the firmware without the ST-Link connected and GDB started (the code would panic). If you remove the semihosting from the code, the led would blink so fast you won't see it blinking.
+
+I made this quick modification which:
+ * removes the message sending via semihosting
+ * adds a `wait()` function which wait for the System Timer Current Statur Register bit 16 (COUNTFLAG) to reach 1. (this bit is automatically set to 1 when the counter reaches 0, and is automatically reset to 0 after it's read)
+
+ So now I can plus the Blue Pill on an USB Charger and look at the LED blinking when I get asleep late at night:
+ ```rust
+ #![no_main]
+#![no_std]
+
+extern crate panic_halt;
+
+use cortex_m_rt::entry;
+
+#[repr(C)]
+struct SysTick {
+    pub csr: u32,
+    pub rvr: u32,
+    pub cvr: u32,
+    pub calib: u32,
+}
+
+#[repr(C)]
+struct PortConfiguration {
+    pub GPIOx_CRL: u32,
+    pub GPIOx_CRH: u32,
+    pub GPIOx_IDR: u32,
+    pub GPIOx_ODR: u32,
+    pub GPIOx_BSRR: u32,
+    pub GPIOx_BRR: u32,
+    pub GPIOx_LCKR: u32,
+}
+
+const PORT_C_BASE_ADDRESS: u32 = 0x4001_1000;
+const RCC_APB2ENR_ADDRESS: u32 = 0x4002_1000 + 0x18;
+const SYSTEM_TIMER_BASE_ADDRESS: u32 = 0xE000_E010;
+const SYSTICK_COUNT_FLAG: u32 = 1 << 16;
+
+#[entry]
+fn main() -> ! {
+
+    let systick = unsafe { &mut *(SYSTEM_TIMER_BASE_ADDRESS as *mut SysTick) };
+    let port_c_sfr = unsafe { &mut *(PORT_C_BASE_ADDRESS as *mut PortConfiguration) };
+
+    // Enables IO port C clock, disable many other that are probably already disabled.
+    unsafe { core::ptr::write_volatile(RCC_APB2ENR_ADDRESS as *mut u32, 1 << 4) };
+
+    // Reload  Value Register set to 0x000F0000
+    // when timer starts or reachs 0, set automatically set is back to this value
+    unsafe { core::ptr::write_volatile(&mut systick.rvr, 0x000FFFFF) };
+    
+    // Timer Control and Status Register set so:
+    // -Timer uses processor clock
+    // -No exception is raised when value reaches zero
+    // -Counter is enabled
+    unsafe { core::ptr::write_volatile(&mut systick.csr, 0b000000000000000_0_0000000000000_101) };
+
+    // Port Configuration Register High for Port E:
+    // -everything is floating input, exceptpin PC13 which is open drain output.
+    unsafe { core::ptr::write_volatile(&mut port_c_sfr.GPIOx_CRH, 0b0100_0100_0110_0100_0100_0100_0100_0100 ) };
+
+    loop {
+        unsafe { core::ptr::write_volatile(&mut port_c_sfr.GPIOx_ODR, 0b0000000000000000_0010000000000000 ) };
+        wait();
+        unsafe { core::ptr::write_volatile(&mut port_c_sfr.GPIOx_ODR, 0b0000000000000000_0000000000000000 ) };
+        wait();
+    }
+}
+
+fn wait() -> () {
+    let systick = unsafe { &mut *(SYSTEM_TIMER_BASE_ADDRESS as *mut SysTick) };
+    while (unsafe { (core::ptr::read_volatile(&mut systick.csr) & SYSTICK_COUNT_FLAG ) == 0}) {
+    }
+}
+```
+
+# Switchingto HAL
+
+Now that I've understood many things trying to do in rust exactly what I would have done in assembly, it is time to try using the Hardware Abstraction Layer and get rid of the unsafe code in my files. First I will import the crate and add two attributes to the `main.rs` which now starts with:
+``` Rust
+#![deny(unsafe_code)]
+#![deny(warnings)]
+#![no_main]
+#![no_std]
+
+extern crate panic_halt;
+extern crate stm32f103xx_hal;
+```
+and add the crate to `cargo.toml`. The stm32f103xx_hal crate is not available from crates.io, so we need to fetch it from github:
+```rust
+stm32f103xx_hal = { git = "https://github.com/japaric/stm32f103xx_hal" }
+```
+
+Now `cargo build` will download the needed crates, and complain about all that unsafe code.
+
+I will first try to deal with acessing the Port C.
+
+The RCC register (which allow for activating the clock for Port C) will be dealt with by the code of the HAL, so I can remove this line:
+```rust
+    // Enables IO port C clock, disable many other that are probably already disabled.
+    unsafe { core::ptr::write_volatile(RCC_APB2ENR_ADDRESS as *mut u32, 1 << 4) };
+```
+together with all the definition of RCC_APB2ENR_ADDRESS.
+
+But for the HAL to be able to modify the RCC, I first must request the ownership on it, to I can pass it to the crate (this is Rust way of preventing conflicting modifications on the RCC):
+```rust
+use crate::stm32f103xx_hal::{
+    prelude::*,
+    device,
+};
+
+[...]
+
+    let device_peripherals = device::Peripherals::take().unwrap();
+    let mut rcc = dp.RCC.constrain();
+```
+Now that I have a mutable reference on the RCC, I can pass it to the crate to get a mutable reference on Port C, and then on the pin to which the LED is connected:
+```rust
+    let mut gpioc = dp.GPIOC.split(&mut rcc.apb2);
+    let mut led = gpioc.pc13.into_push_pull_output(&mut gpioc.crh);
+```
+To get the mutable reference to the pin, I need to tell the HAL that I want to use the pin in push_pull_output mode, so I no longer need these lines:
+```rust
+    // Port Configuration Register High for Port E:
+    // -everything is floating input, exceptpin PC13 which is open drain output.
+    unsafe { core::ptr::write_volatile(&mut port_c_sfr.GPIOx_CRH, 0b0100_0100_0110_0100_0100_0100_0100_0100 ) };
+```
+And now I can modify the state of the pin using the HAL, so I can replace:
+```rust
+unsafe { core::ptr::write_volatile(&mut port_c_sfr.GPIOx_ODR, 0b0000000000000000_0010000000000000 ) };
+```
+with:
+```rust
+led.set_high();
+```
+At this point, if I can try to comment the `#![deny(unsafe_code)]` attribute and `cargo build` this version that has HAL and safe access to the LED but still handles the timer in an unsafe and hugly way.
+
+It seems it partially works: the LED blinks but at a very high frequency. I guess my `wait()` is not working because the HAL changed some settings on the system time or changed the frequency of the system clock.
+
+I made a few tests to confirm that the probleme was with `wait()` and not with the access to `PC13` (Port C, pin 13), and changing the `systick.rvr` (reset value of the timer, that means duration of the wait) did not change anything. So the System Counter must have been deactivated when accessing RCC to activate Port C clock.
+
+So I try to use the HAL to access the timer too:
+```rust
+use nb::block;
+
+use crate::stm32f103xx_hal::{
+    prelude::*,
+    device,
+    timer::Timer,
+};
+
+[...]
+
+    let cortex_peripherals = cortex_m::Peripherals::take().unwrap();
+    let mut flash = device_peripherals.FLASH.constrain();
+    let clocks = rcc.cfgr.freeze(&mut flash.acr);
+    let mut timer = Timer::syst(cortex_peripherals.SYST, 5.hz(), clocks);
+
+    loop {
+        block!(timer.wait()).unwrap();
+        block!(timer.wait()).unwrap();
+        block!(timer.wait()).unwrap();
+        block!(timer.wait()).unwrap();
+        block!(timer.wait()).unwrap();
+        led.set_high();
+        block!(timer.wait()).unwrap();
+        led.set_low();
+        block!(timer.wait()).unwrap();
+        led.set_high();
+        block!(timer.wait()).unwrap();
+        led.set_low();
+    }
+```
+The `block!` macro comes from the `nb` (non blockng io layer) crate, so we add it to the `cargo.toml` file:
+```
+nb = "0.1.1"
+```
+And it works.
+
+But I'm not really happy with this: I copy-pasted some of the code and don't understand why we need access to something called `FLASH` to use the clock.
